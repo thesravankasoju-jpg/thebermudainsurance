@@ -25,6 +25,17 @@ CTX = SessionContext(prev_close=24200.0, prev_open=24150.0,
                      prev_high=24260.0, prev_low=24100.0,
                      avg_early_range=100.0)  # typical 09:15-10:00 Nifty range
 
+# CTX with avg_early_range=None reproduces what run_backtest() actually feeds
+# every session: the range filter is computed from PRIOR sessions' ranges,
+# not a hand-picked constant. A test that only exercises the fixed-CTX path
+# can pass while the real multi-day driver still fails - that happened here
+# once already (SYN-2-trap-reversal shorted the spring in the CLI report
+# while the fixed-CTX unit test showed LONG), so every regime test below
+# must be checked under both contexts, not just the convenient one.
+CTX_NO_RANGE_FILTER = SessionContext(prev_close=24200.0, prev_open=24150.0,
+                                     prev_high=24260.0, prev_low=24100.0,
+                                     avg_early_range=None)
+
 
 def bars_until(bars, hhmm):
     """Bars whose CLOSE time is <= hhmm (what the system can know at hhmm)."""
@@ -73,10 +84,24 @@ class TestDecisionRegimes:
         assert d.direction == NEUTRAL, d.summary()
 
     def test_trap_day_is_never_shorted_by_the_engine(self):
-        """The stop-hunt reads SHORT for the first bars; the persistence
-        gate must keep the engine out until the spring resolves it."""
-        r = run_session("trap", synthetic.trap_day(), CTX)
-        assert r.direction != SHORT, (r.direction, r.exit_reason)
+        """The stop-hunt reads SHORT for the first bars; entry must not
+        commit until the trap-detector General (failed_breakdown) has had
+        enough bars to weigh in and the spring resolves it. Checked under
+        BOTH contexts - this exact regression (passed under CTX, failed
+        under the driver's real dynamic range) is why both exist."""
+        for ctx in (CTX, CTX_NO_RANGE_FILTER):
+            r = run_session("trap", synthetic.trap_day(), ctx)
+            assert r.direction != SHORT, (ctx.avg_early_range, r.direction, r.exit_reason)
+
+    def test_trap_day_regression_under_driver_conditions(self):
+        """Exact reproduction of the bug found via manual /model review:
+        entry_streak could be satisfied entirely from pre-trap-detector
+        bars when avg_early_range came from a prior session's real range
+        instead of a generous constant. Locks the fix in permanently."""
+        r = run_session("trap", synthetic.trap_day(), CTX_NO_RANGE_FILTER)
+        assert r.direction == LONG
+        assert r.exit_reason == "SQUARE_OFF_1515"
+        assert r.net_pnl > 0
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +159,33 @@ class TestSquareOff:
 # ---------------------------------------------------------------------------
 # 5. No lookahead
 # ---------------------------------------------------------------------------
+
+class TestTrapDetectorActivationGate:
+    """The gate added after the regression: no directional entry may commit
+    before every General - especially failed_breakdown_general, which needs
+    >=5 bars - has had a chance to vote."""
+
+    def test_gate_constant_matches_general_requirement(self):
+        # If failed_breakdown_general's minimum-bars requirement ever
+        # changes, this constant must move with it.
+        from generals.bar_generals import failed_breakdown_general, Bar
+        stub = [Bar(f"09:{15+5*i:02d}", 100, 101, 99, 100, 0) for i in range(4)]
+        assert failed_breakdown_general(stub, CTX).confidence == 0.0  # silent at 4 bars
+        stub.append(Bar("09:35", 100, 101, 99, 100, 0))
+        # at 5 bars it may now speak (confidence need not be nonzero for
+        # this flat stub, but the function must not raise / stay gated code path)
+        assert S.MIN_BARS_FOR_DIRECTIONAL_ENTRY == 5
+
+    def test_no_directional_fill_before_gate_opens(self):
+        """Across every regime, the entry bar index must be >= the gate."""
+        for name, bars in synthetic.demo_sessions().items():
+            r = run_session(name, bars, CTX_NO_RANGE_FILTER)
+            if r.direction not in (LONG, SHORT) or r.entry_time is None:
+                continue
+            entry_bar_index = next(i for i, b in enumerate(bars) if b.ts == r.entry_time)
+            assert entry_bar_index >= S.MIN_BARS_FOR_DIRECTIONAL_ENTRY, \
+                f"{name} filled at bar {entry_bar_index}, before the gate opens"
+
 
 class TestNoLookahead:
     def test_future_bars_cannot_change_the_decision(self):

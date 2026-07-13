@@ -89,6 +89,16 @@ FLASH_SCORE = 0.50
 FLASH_CONFIDENCE = 85
 RANGE_FILTER_RATIO = 0.5       # session range < ratio * median early range -> NEUTRAL
 
+# Trap-detector activation gate: failed_breakdown_general needs >=5 bars of
+# history before it can vote (it must see the opening range AND a
+# subsequent break attempt). No directional entry may lock in before every
+# General that could veto it has had a chance to speak - otherwise the
+# persistence gate can be satisfied entirely from bars laid down BEFORE the
+# trap detector switches on, which defeats its purpose. Found via a real
+# integration-test failure (SYN-2-trap-reversal still shorted the spring
+# after the persistence gate was added) - not a hypothetical concern.
+MIN_BARS_FOR_DIRECTIONAL_ENTRY = 5
+
 GENERAL_WEIGHTS = {
     # Price-action squad (computable from bar data, active today)
     "gap": 2.0,

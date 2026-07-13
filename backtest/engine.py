@@ -213,11 +213,17 @@ def run_session(date: str, bars: List[Bar], ctx: SessionContext,
             if collect_log:
                 res.decision_log.append(f"{bar.ts}+5m {d.summary()}")
 
+            # Trap-detector activation gate: don't let a directional read
+            # count toward entry until every General - especially
+            # failed_breakdown_general, which needs >=5 bars to see a
+            # break-and-reclaim - has had a chance to veto it.
+            trap_detector_live = (i + 1) >= S.MIN_BARS_FOR_DIRECTIONAL_ENTRY
+
             # Persistence gate: stop-hunts read directional for a bar or two
             # then flip; institutional moves persist. Require agreement on
             # consecutive closes before committing capital - except at the
             # 10:00 cutoff, where the rule of the system is: decide and enter.
-            if d.direction in (LONG, SHORT):
+            if d.direction in (LONG, SHORT) and trap_detector_live:
                 if d.direction == streak_direction:
                     entry_streak += 1
                 else:
@@ -230,8 +236,8 @@ def run_session(date: str, bars: List[Bar], ctx: SessionContext,
             confirmed = (entry_streak >= S.ENTRY_CONFIRM_BARS
                          or (flash and entry_streak >= S.FLASH_CONFIRM_BARS))
             at_cutoff = end_min >= ENTRY_CUTOFF_MIN
-            enter_directional = d.direction in (LONG, SHORT) and \
-                (confirmed or at_cutoff)
+            enter_directional = (d.direction in (LONG, SHORT) and trap_detector_live
+                                 and (confirmed or at_cutoff))
 
             if (enter_directional or at_cutoff) and i + 1 < len(bars):
                 nxt = bars[i + 1]
