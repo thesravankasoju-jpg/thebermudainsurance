@@ -1,5 +1,13 @@
 # Control Room Specification - The Heart of the System
 
+> **STATUS: DESIGN DOCUMENT - UNVALIDATED.** Every accuracy percentage,
+> P&L figure, and worked example below is a design target or illustrative
+> narrative, NOT measured performance. Position sizes in older examples
+> also predate the verified specs (lot 65, ~4 lots on Rs 10L capital -
+> see `docs/DATA_REALITY.md`). The implemented, tested decision logic
+> lives in `control_room/decision.py`; the backtest engine in
+> `backtest/engine.py` is the only source of legitimate numbers.
+
 ## Executive Summary
 
 The Control Room is the **ultra-fast, institutional move detection engine** that:

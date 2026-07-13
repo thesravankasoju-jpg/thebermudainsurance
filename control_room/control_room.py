@@ -8,7 +8,8 @@ import time
 from datetime import datetime
 from collections import deque
 from utils.logger import setup_logger
-from config.settings import BULLISH_THRESHOLD, BEARISH_THRESHOLD, GENERAL_WEIGHTS
+from config.settings import (LONG_SCORE_THRESHOLD, SHORT_SCORE_THRESHOLD,
+                             GENERAL_WEIGHTS)
 
 logger = setup_logger(__name__)
 
@@ -298,8 +299,8 @@ class ControlRoom:
             return {
                 'action': 'BUY' if institutional_signal['direction'] == 'BULLISH' else 'SELL',
                 'confidence': institutional_signal['confidence'],
-                'reason': f'Sudden institutional move ({institutional_signal["direction"]}) - "
-                         f"likely news event, confidence: {institutional_signal["confidence"]}%'
+                'reason': (f"Sudden institutional move ({institutional_signal['direction']}) - "
+                           f"likely news event, confidence: {institutional_signal['confidence']}%")
             }
 
         return {

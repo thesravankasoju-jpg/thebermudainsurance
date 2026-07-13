@@ -1,83 +1,123 @@
 """
-Configuration settings for the Nifty Trading System
+Configuration settings for the Nifty Trading System.
+
+CONTRACT SPECS VERIFIED 2026-07-13:
+- Lot size 65: NSE circular FAOP70616 (2025-10-03), effective January 2026 series
+  (revised down from 75; SEBI Rs 10-15 lakh notional band).
+- NRML margin ~Rs 1.9L/lot: SPAN ~1.56L + Exposure ~0.32L at spot ~24,200-24,800
+  (Zerodha margin calculator). Intraday (MIS) margin for index futures is the
+  same as NRML under peak-margin rules - there is NO extra intraday leverage.
+- Margins move with volatility. Live code must read the actual margin from the
+  Kite margins API before sizing; these constants are for backtests and sizing
+  sanity checks only.
 """
 
 # ============================================================================
 # CAPITAL AND RISK MANAGEMENT
 # ============================================================================
-CAPITAL = 1000000  # ₹10 lakh starting capital
-STOP_LOSS_PERCENT = 2  # 2% hard stop loss = ₹20,000
-MAX_LOSS = CAPITAL * STOP_LOSS_PERCENT / 100
+CAPITAL = 1_000_000            # Rs 10 lakh
+STOP_LOSS_PERCENT = 2.0        # hard daily stop on total capital
+MAX_DAILY_LOSS = CAPITAL * STOP_LOSS_PERCENT / 100   # Rs 20,000
 
 # ============================================================================
-# NIFTY FUTURES SPECIFICATIONS (Corrected)
+# NIFTY FUTURES CONTRACT SPECS (Jan-2026 series onward)
 # ============================================================================
-NIFTY_LOT_SIZE = 25  # shares per contract
-NIFTY_TICK_SIZE = 0.05  # ₹0.05
-MARGIN_PER_LOT = 70000  # ₹70,000 average SPAN margin
-BROKERAGE_PER_ROUNDTRIP = 40  # ₹40 per round trip
-SLIPPAGE_PAISE = 3  # 3 paise average slippage
+NIFTY_LOT_SIZE = 65            # units per lot (NSE circular FAOP70616)
+NIFTY_TICK_SIZE = 0.05
+MARGIN_PER_LOT = 190_000       # SPAN + Exposure, approx; read live from Kite
 
-# Calculate max contracts based on capital
-MAX_CONTRACTS = int(CAPITAL / MARGIN_PER_LOT)  # ~14 contracts for 10L capital
+# Sizing: keep a margin buffer so adverse MTM never triggers a margin call.
+# 10L capital -> 8L deployable -> floor(8L / 1.9L) = 4 lots = 260 qty.
+MARGIN_BUFFER_PERCENT = 20
+DEPLOYABLE_CAPITAL = CAPITAL * (1 - MARGIN_BUFFER_PERCENT / 100)
+MAX_CONTRACTS = int(DEPLOYABLE_CAPITAL // MARGIN_PER_LOT)      # 4 lots
+TRADE_QTY = MAX_CONTRACTS * NIFTY_LOT_SIZE                     # 260 units
 
-# ============================================================================
-# TRADING STRATEGY
-# ============================================================================
-TRADING_START_TIME = "09:30"  # Market open time (always enter)
-TRADING_END_TIME = "15:30"  # Market close time
-SIGNAL_UPDATE_INTERVAL_MINUTES = 5  # Update control room every 5 minutes
-MIN_CONFIDENCE_TO_TRADE = 70  # Minimum 70% confidence to execute
+# Hard stop expressed in index points for the futures position:
+# 20,000 / 260 = ~77 points adverse move closes everything.
+STOP_POINTS = MAX_DAILY_LOSS / TRADE_QTY if TRADE_QTY else 0.0
 
-# Thresholds for direction classification
-BULLISH_THRESHOLD = 0.6
-BEARISH_THRESHOLD = -0.6
-# Between these thresholds = NEUTRAL (use straddle/strangle)
+# Neutral days trade short straddles with reduced size (margin per short
+# straddle lot is higher than futures and gamma risk is unbounded).
+STRADDLE_LOTS = 2
 
 # ============================================================================
-# GENERAL PARAMETERS
+# TRANSACTION COSTS (Zerodha, futures, as of 2026)
 # ============================================================================
-TOTAL_GENERALS = 100  # Number of analyzing agents
-HIGH_IMPACT_GENERALS = [
-    "order_flow",
-    "options_greeks",
-    "fii_dii",
-    "top_20_correlation"
-]
+BROKERAGE_PER_ORDER = 20.0     # flat Rs 20 or 0.03%, whichever lower
+STT_SELL_PCT = 0.02            # % of sell-side notional (futures)
+EXCHANGE_TXN_PCT = 0.00173     # % of notional, each side
+STAMP_DUTY_BUY_PCT = 0.002     # % of buy-side notional
+GST_PCT = 18.0                 # on brokerage + exchange charges
+SLIPPAGE_POINTS = 1.0          # per side; index futures are liquid
+
+# ============================================================================
+# SESSION TIMINGS (IST)
+# ============================================================================
+MARKET_OPEN = "09:15"          # NSE cash/derivatives open (not 09:30)
+ENTRY_DECISION_START = "09:30" # begin evaluating entry (user rule)
+ENTRY_CUTOFF = "10:00"         # must have decided/entered by now (user rule)
+SQUARE_OFF = "15:15"           # force-close everything (user rule)
+MARKET_CLOSE = "15:30"
+
+BAR_INTERVAL_MINUTES = 5
+
+# ============================================================================
+# CONTROL ROOM DECISION THRESHOLDS
+# ----------------------------------------------------------------------------
+# NOTE: these are engineering defaults, NOT calibrated values. They must be
+# tuned on real historical data (walk-forward, out-of-sample) before any
+# capital is deployed. Do not treat backtest output as validated performance
+# until that calibration exists.
+# ============================================================================
+LONG_SCORE_THRESHOLD = 0.25    # aggregate score >= this -> LONG
+SHORT_SCORE_THRESHOLD = -0.25  # aggregate score <= this -> SHORT
+MIN_CONFIDENCE_TO_TRADE = 60   # 0-100; below this -> NEUTRAL handling
+REVERSAL_EXIT_BARS = 2         # consecutive opposite-signal bars to exit early
+
+# Fake-move defences (the trap filter):
+# - A directional entry needs the SAME direction on ENTRY_CONFIRM_BARS
+#   consecutive bar closes. Stop-hunts read directional for 1-2 bars and
+#   then flip; real institutional moves persist.
+# - A flash move (news shock) with extreme score+confidence may enter after
+#   FLASH_CONFIRM_BARS instead.
+# - No directional call at all when the session range is compressed vs the
+#   recent median 09:15-10:00 range: small ranges are noise, not intent.
+ENTRY_CONFIRM_BARS = 3
+FLASH_CONFIRM_BARS = 2
+FLASH_SCORE = 0.50
+FLASH_CONFIDENCE = 85
+RANGE_FILTER_RATIO = 0.5       # session range < ratio * median early range -> NEUTRAL
 
 GENERAL_WEIGHTS = {
-    "order_flow": 4.0,  # Most important
-    "options_greeks": 3.0,
-    "fii_dii": 3.0,
-    "top_20_correlation": 3.0,
-    "volume": 2.0,
-    "technical": 2.0,
-    "sentiment": 1.5,
-    "default": 1.0  # Other generals
+    # Price-action squad (computable from bar data, active today)
+    "gap": 2.0,
+    "opening_range": 2.5,
+    "failed_breakdown": 3.0,   # trap detector (spring/upthrust)
+    "vwap": 2.0,
+    "momentum": 2.0,
+    "structure": 1.5,
+    "volume_pressure": 2.0,
+    "persistence": 1.5,
+    "prev_day": 1.0,
+    # Squads that need live Kite recording before they can exist honestly:
+    # order-book depth, options greeks/OI, cross-index correlation.
+    "default": 1.0,
 }
 
 # ============================================================================
 # DATA SOURCES
 # ============================================================================
-KITE_API_KEY = "your_kite_api_key"  # Will be set from environment
-KITE_ACCESS_TOKEN = "your_access_token"  # Will be set from environment
+KITE_API_KEY = ""              # read from env KITE_API_KEY in live code
+KITE_ACCESS_TOKEN = ""         # read from env KITE_ACCESS_TOKEN
+NIFTY_INDEX_INSTRUMENT_TOKEN = 256265   # NSE:NIFTY 50 index token on Kite
 
-# FII/DII data source (external)
-NSE_FIIDII_URL = "https://www.nseindia.com/api/fiidii"
-
-# Top 20 Nifty stocks (by weight)
 TOP_20_NIFTY_STOCKS = [
-    "RELIANCE", "TCS", "HDFCBANK", "INFOSY", "ICICIBANK",
-    "HINDUNILVR", "LT", "SBIN", "MARUTI", "BAJAJFINSV",
-    "WIPRO", "ASIANPAINT", "SUNPHARMA", "KOTAKBANK", "ITC",
-    "AXISBANK", "M&M", "TITAN", "HDFC", "JSWSTEEL"
-]
-
-# ============================================================================
-# POSITION MANAGEMENT
-# ============================================================================
-POSITION_UPDATE_INTERVAL = 1  # Update P&L every 1 minute
-MONITORING_LOOP_SLEEP = 5  # Check positions every 5 seconds
+    "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS",
+    "ITC", "LT", "BHARTIARTL", "AXISBANK", "SBIN",
+    "KOTAKBANK", "M&M", "HINDUNILVR", "BAJFINANCE", "MARUTI",
+    "SUNPHARMA", "NTPC", "TATAMOTORS", "TITAN", "ULTRACEMCO",
+]  # refresh weights monthly from NSE indices factsheet
 
 # ============================================================================
 # LOGGING
@@ -85,17 +125,3 @@ MONITORING_LOOP_SLEEP = 5  # Check positions every 5 seconds
 LOG_LEVEL = "INFO"
 LOG_FILE = "logs/trading_system.log"
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-# ============================================================================
-# BACKTESTING
-# ============================================================================
-BACKTEST_CAPITAL = 1000000
-BACKTEST_INITIAL_CASH = 1000000
-BACKTEST_COMMISSION = BROKERAGE_PER_ROUNDTRIP / 100  # In percentage
-
-# ============================================================================
-# STRATEGY MODES
-# ============================================================================
-MODE_BULLISH = "LONG"  # Go long on bullish signal
-MODE_BEARISH = "SHORT"  # Go short on bearish signal
-MODE_NEUTRAL = "STRADDLE"  # Short straddle on neutral signal

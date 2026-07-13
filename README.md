@@ -1,221 +1,102 @@
-# Nifty 50 Automated Trading System - 100 Generals Control Room
+# Nifty 50 Intraday System - "100 Generals" Control Room
 
-A sophisticated automated trading system for Nifty 50 index using multi-agent analysis framework powered by the "100 Generals" control room concept.
+An intraday Nifty 50 futures/options system: a roster of independent
+analyzing agents ("Generals") feeds a Control Room that decides LONG /
+SHORT / NEUTRAL between 09:30 and 10:00 IST, manages the position, and
+force-closes everything at 15:15. Hard stop: 2% of capital per day.
 
-## System Overview
+**Status: strategy machinery complete and tested; NOT calibrated, NOT
+validated on sufficient real data, order placement disabled.** Read
+[docs/DATA_REALITY.md](docs/DATA_REALITY.md) before believing any number.
 
-### Architecture
+## The rules of the system
 
-```
-Market Data (Kite API)
-        ↓
-100 Generals (Parallel Agents)
-├─ Order Flow General
-├─ Options Greeks General
-├─ FII/DII General
-├─ Top 20 Correlation General
-├─ Volume General
-├─ Technical General
-├─ Sentiment General
-└─ ... 93 more
-        ↓
-Control Room (Aggregation & Decision)
-        ↓
-Trading Engine (Execution)
-        ├─ LONG (Bullish)
-        ├─ SHORT (Bearish)
-        └─ STRADDLE/STRANGLE (Neutral)
-        ↓
-Risk Manager (2% Stop Loss)
-```
+| Rule | Value |
+|------|-------|
+| Capital | Rs 10,00,000 |
+| Entry window | 09:30-10:00 IST, enters every session |
+| Bullish read | LONG Nifty futures |
+| Bearish read | SHORT Nifty futures |
+| Neutral read | Short straddle (reduced size) |
+| Hard stop | 2% of capital (Rs 20,000) on MTM, all positions closed |
+| Square-off | 15:15 IST, always - intraday only, no overnight risk |
+| Fake-move defence | 3 consecutive agreeing bar-closes before entry (2 for flash moves); range-compression filter refuses directional calls in dead sessions |
 
-## Key Features
+## Verified contract specs (see docs/DATA_REALITY.md for sources)
 
-### 100 Generals Framework
-- **High-Impact Generals**: Order Flow, Options Greeks, FII/DII, Top 20 Correlation
-- **Medium-Impact Generals**: Volume, Technical Analysis, Sentiment
-- **Adaptive Analysis**: Each General provides independent signal with confidence
+- Lot size **65** (NSE circular FAOP70616, Jan-2026 series onward)
+- Margin **~Rs 1.9L/lot** -> **4 lots max** on 10L (Rs 2.4L MTM buffer kept)
+- 4 lots = 260 qty -> Rs 260/point -> the 2% stop sits **~77 points** away
 
-### Control Room Logic
-- **Weighted Voting System**: Aggregates signals with dynamic weighting
-- **Thresholds**:
-  - BULLISH: Score > +0.6 → Long Nifty Futures
-  - BEARISH: Score < -0.6 → Short Nifty Futures
-  - NEUTRAL: -0.6 to +0.6 → Short Straddle/Strangle
-- **Minimum Confidence**: 70% required to trade
-
-### Trading Rules
-- **Entry Time**: 9:30 AM (every trading day, no exceptions)
-- **Position Size**: 14 contracts (based on ₹70k margin per contract)
-- **Capital**: ₹10,00,000
-- **Stop Loss**: 2% hard stop = ₹20,000
-- **Target**: Unlimited (squeeze market)
-
-## Project Structure
+## Architecture
 
 ```
-thebermudainsurance/
-├── main.py                          # Entry point
-├── config/
-│   └── settings.py                  # Configuration & constants
-├── data/
-│   └── kite_connector.py            # Kite API integration
-├── generals/
-│   ├── __init__.py
-│   └── general_manager.py           # 100 Generals framework
-├── control_room/
-│   ├── __init__.py
-│   └── control_room.py              # Decision aggregation
-├── trading_engine/
-│   ├── __init__.py
-│   └── trader.py                    # Trade execution
-├── risk_management/
-│   ├── __init__.py
-│   └── risk_manager.py              # Risk & position tracking
-├── backtest/
-│   ├── __init__.py
-│   └── backtester.py                # Historical testing
-├── utils/
-│   ├── __init__.py
-│   └── logger.py                    # Logging configuration
-└── logs/                            # Log files
+                    PRE-MARKET (context, may use LLM/news)
+                                  |
+5-min bars ----> GENERALS (deterministic, each votes or ABSTAINS)
+                     price-action squad: 9 active
+                     order-flow / options / cross-market squads: pending
+                     data recording (see docs/DATA_REALITY.md)
+                                  |
+                 CONTROL ROOM  (control_room/decision.py)
+                     weighted vote -> LONG / SHORT / NEUTRAL
+                     persistence gate + range filter (trap defence)
+                     measured cost: 0.069 ms per decision
+                                  |
+            +---------------------+---------------------+
+            |                                           |
+     BACKTEST ENGINE                              LIVE LOOP (paper)
+     backtest/engine.py                           main.py
+     same decision code,                          same decision code,
+     next-bar fills, costs,                       Kite 5-min bars,
+     stop / reversal / 15:15                      no orders placed yet
 ```
 
-## Installation
+The backtester and the live loop import the **same** decision functions -
+the backtest exercises the exact code that would trade.
+
+## Run it
 
 ```bash
-# Clone repository
-git clone <repo-url>
-cd thebermudainsurance
-
-# Install dependencies
 pip install -r requirements.txt
+python -m pytest tests/ -q          # 18 tests: stop, square-off, no-lookahead...
 
-# Setup Kite API credentials
-export KITE_API_KEY="your_api_key"
-export KITE_ACCESS_TOKEN="your_access_token"
+# Engine demo on synthetic regime days (machinery validation, NOT performance):
+python -m backtest.run --source synthetic
+
+# Real data (run where the network allows):
+python -m backtest.run --source yfinance                       # last ~60 days
+python -m backtest.run --source yfinance --detail 2026-06-10   # per-bar log
+KITE_API_KEY=... KITE_ACCESS_TOKEN=... \
+python -m backtest.run --source kite --from 2024-01-01 --to 2026-07-11
+
+# Live paper mode during market hours (prints decisions, places no orders):
+KITE_API_KEY=... KITE_ACCESS_TOKEN=... python main.py
 ```
 
-## Usage
+## Layout
 
-### Run Single Daily Cycle
-```bash
-python main.py
+```
+config/settings.py        specs, risk, thresholds (single source of truth)
+generals/bar_generals.py  9 active price-action Generals (pure functions)
+generals/general_manager.py  roster + squad status
+control_room/decision.py  entry decision + position monitor (shared)
+backtest/engine.py        event-driven simulator: fills, stop, costs, report
+backtest/data_loader.py   kite / yfinance / csv loaders
+backtest/synthetic.py     regime archetypes for engine validation
+backtest/run.py           CLI
+tests/test_system.py      the guarantees, as executable tests
+docs/DATA_REALITY.md      what is knowable when; read this first
+main.py                   live paper loop (Kite)
 ```
 
-### Run Live Monitoring (Production)
-```python
-system = NiftyTradingSystem()
-system.monitor_positions()  # Continuous monitoring
-```
+## Road to live capital (in order, no skipping)
 
-### Backtest on Historical Data
-```python
-from backtest.backtester import Backtester
-
-backtester = Backtester(capital=1000000, strategy=system)
-results = backtester.run_backtest(historical_data)
-```
-
-## Performance Metrics
-
-### Corrected Nifty Futures Specifications
-
-| Parameter | Value |
-|-----------|-------|
-| Lot Size | 25 shares |
-| Margin per Lot | ₹70,000 |
-| Max Contracts | 14 (with ₹10L capital) |
-| Brokerage | ₹40 per round trip |
-| Slippage | 2-5 paise |
-
-### Historical Backtests
-
-#### March 23, 2020 (Worst Case - COVID Crash)
-- **Signal**: BEARISH (13% daily crash)
-- **Entry**: Short 14 contracts at ₹8,550
-- **Exit**: ₹7,511
-- **Profit**: ₹3,63,570 (+36.36%)
-- **Stop Loss**: Never breached ✓
-
-#### June 13, 2026 (Neutral to Bullish Recovery)
-- **Signal**: NEUTRAL → BULLISH (recovery after gap down)
-- **Entry**: Long 14 contracts at ₹24,100
-- **Exit**: ₹24,211
-- **Profit**: ₹38,770 (+3.88%)
-- **Stop Loss**: Never breached ✓
-
-## Configuration
-
-Edit `config/settings.py` to customize:
-
-```python
-CAPITAL = 1000000                    # Starting capital
-STOP_LOSS_PERCENT = 2               # 2% hard stop
-MIN_CONFIDENCE_TO_TRADE = 70        # Confidence threshold
-SIGNAL_UPDATE_INTERVAL_MINUTES = 5  # Signal refresh rate
-```
-
-## Risk Management
-
-- **Daily Stop Loss**: ₹20,000 (2% of capital)
-- **Auto Close**: All positions closed if stop loss hit
-- **Position Limits**: Max 14 contracts per trade
-- **Margin Management**: Real-time margin monitoring
-
-## Next Steps
-
-### Priority Tasks
-
-1. **Implement Individual Generals**
-   - Order Flow analysis from Kite orderbook
-   - Options Greeks calculation
-   - FII/DII data fetching
-   - Top 20 stock correlation tracking
-
-2. **Build Backtesting Engine**
-   - Historical data loader
-   - Simulate trades with slippage
-   - Generate performance reports
-
-3. **Test on Historical Scenarios**
-   - March 23, 2020 (worst case)
-   - June 13, 2026 (neutral recovery)
-   - Additional stress test scenarios
-
-4. **Deploy to Production**
-   - Paper trading validation
-   - Live trading with Kite API
-   - Real-time monitoring and alerts
-
-## Important Notes
-
-### Nifty is Mathematical, Not Prediction
-- System follows mathematical relationships, not predicts
-- Top 20 stocks determine Nifty movements
-- Smart money flows visible through order flow analysis
-- System adapts to what the math shows in real-time
-
-### Daily Entry Requirement
-- System enters market **EVERY DAY** at 9:30 AM
-- Direction determined by 100 Generals analysis
-- No skipping or "waiting for perfect conditions"
-
-## Support & Debugging
-
-```bash
-# Check logs
-tail -f logs/trading_system.log
-
-# Verbose logging
-export LOG_LEVEL=DEBUG
-python main.py
-```
-
-## License
-
-Proprietary - Not for public distribution
-
-## Contact
-
-For questions or issues, contact: sravan.kasoji@gmail.com
+1. Run the backtest on 1-2 YEARS of Kite 5-minute data; calibrate
+   thresholds walk-forward with out-of-sample separation.
+2. Build the live Kite WebSocket recorder (depth ticks + option chains +
+   top-20 quotes) so the order-flow and options squads can be built and
+   validated on recorded data instead of imagination.
+3. Paper-trade for weeks; the live decisions must match the backtest on
+   the same days.
+4. Only then wire order placement, starting at 1 lot.
