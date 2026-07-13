@@ -8,13 +8,18 @@ from config.settings import NIFTY_LOT_SIZE, BROKERAGE_PER_ROUNDTRIP
 logger = setup_logger(__name__)
 
 class TradingEngine:
-    """Executes trading decisions via Kite API"""
+    """
+    Executes trading decisions via Kite API
+    INTRADAY ONLY - Auto-closes ALL positions at 3:15 PM
+    """
 
     def __init__(self, kite_connector):
         self.kite = kite_connector
         self.active_positions = []
         self.trade_history = []
-        logger.info("TradingEngine initialized")
+        self.entry_window_open = False  # 9:30 AM - 10:00 AM
+        self.trading_active = False  # 10:00 AM - 3:15 PM
+        logger.info("TradingEngine initialized (INTRADAY MODE - All positions close at 3:15 PM)")
 
     def execute_trade(self, control_signal, max_contracts):
         """
@@ -130,16 +135,72 @@ class TradingEngine:
         logger.info(f"Position closed: P&L = {position['pnl']}")
         return position
 
-    def close_all_positions(self):
-        """Close all active positions (for stop loss)"""
+    def close_all_positions(self, reason="STOP_LOSS"):
+        """Close all active positions (for stop loss or market close)"""
         nifty_data = self.kite.fetch_realtime_data()
         current_price = nifty_data['nifty']['last_price']
 
+        closed_count = 0
         for position in self.active_positions:
             if position['status'] == 'OPEN':
                 self.close_position(position, current_price)
+                closed_count += 1
 
-        logger.warning("All positions closed due to stop loss")
+        if reason == "MARKET_CLOSE":
+            logger.warning(f"AUTO-CLOSED all {closed_count} positions at 3:15 PM (Market close)")
+        else:
+            logger.warning(f"CLOSED all {closed_count} positions due to {reason}")
+
+    def check_and_auto_close_at_market_close(self):
+        """
+        Check if it's 3:15 PM and auto-close ALL positions
+        This runs every tick to ensure positions are closed
+        """
+        from datetime import datetime
+
+        current_time = datetime.now()
+
+        # Auto-close at 3:15 PM
+        if current_time.hour == 15 and current_time.minute >= 15:
+            active_positions = self.get_active_positions()
+            if active_positions:
+                logger.critical(f"MARKET CLOSE (3:15 PM): AUTO-CLOSING {len(active_positions)} positions")
+                self.close_all_positions(reason="MARKET_CLOSE")
+                return True  # Positions were closed
+
+        return False  # Not time to close yet
+
+    def get_entry_window_status(self):
+        """Check if we're in entry window (9:30 AM - 10:00 AM)"""
+        from datetime import datetime
+
+        current_time = datetime.now()
+
+        # Entry window: 9:30 AM to 10:00 AM
+        if current_time.hour == 9 and current_time.minute >= 30:
+            return True
+        elif current_time.hour == 10 and current_time.minute < 0:
+            return True
+        elif current_time.hour == 10 and current_time.minute == 0:
+            return True
+
+        return False
+
+    def get_trading_window_status(self):
+        """Check if we're in active trading window (10:00 AM - 3:15 PM)"""
+        from datetime import datetime
+
+        current_time = datetime.now()
+
+        # Trading window: 10:00 AM to 3:15 PM
+        if current_time.hour == 10 and current_time.minute >= 0:
+            return True
+        elif current_time.hour > 10 and current_time.hour < 15:
+            return True
+        elif current_time.hour == 15 and current_time.minute < 15:
+            return True
+
+        return False
 
     def get_active_positions(self):
         """Get all active positions"""
