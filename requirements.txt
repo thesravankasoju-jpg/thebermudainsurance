@@ -1,0 +1,10 @@
+# Core (backtest + tests run with just these)
+pytest>=8
+
+# Live trading / real data
+kiteconnect>=5        # Zerodha Kite API
+yfinance>=0.2         # free ^NSEI 5-min bars (last ~60 days only)
+
+# Optional analysis/visualisation
+pandas>=2
+matplotlib>=3
