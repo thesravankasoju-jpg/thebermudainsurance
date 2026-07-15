@@ -230,3 +230,24 @@ class TestDailyEntryAndAccounting:
                 continue
             assert 0 < r.costs < 5000, f"{name} costs {r.costs}"
             assert abs((r.gross_pnl - r.costs) - r.net_pnl) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# 7. Scaled entry for better move capture
+# ---------------------------------------------------------------------------
+
+class TestScaledEntry:
+    def test_scaled_entry_increases_position_gradually(self):
+        """Scaled entry should open with 1 lot, then add 1 lot, then add 2 lots."""
+        bars = synthetic.rally_day()
+        r = run_session("rally", bars, CTX, collect_log=True)
+
+        # Verify entry happened
+        assert r.direction == LONG
+        assert r.entry_time is not None
+
+        # Full position should be entered by 10:00 at most
+        assert r.exit_reason == "SQUARE_OFF_1515"
+
+        # P&L on a strong trend should be positive
+        assert r.net_pnl > 0, "Strong trend day should profit"

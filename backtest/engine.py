@@ -132,6 +132,7 @@ def run_session(date: str, bars: List[Bar], ctx: SessionContext,
     opposite_streak = 0
     entry_streak = 0         # consecutive same-direction reads pre-entry
     streak_direction = None
+    total_qty_open = 0       # current quantity held (for scaled entry)
 
     i = 0
     while i < len(bars):
@@ -144,6 +145,31 @@ def run_session(date: str, bars: List[Bar], ctx: SessionContext,
             direction = position["direction"]
 
             if direction in (LONG, SHORT):
+                # Scaled entry: add contracts on subsequent bars in entry window
+                if (ENTRY_START_MIN <= end_min <= ENTRY_CUTOFF_MIN and
+                    "entry_bar_index" in position and
+                    i > position["entry_bar_index"] and
+                    total_qty_open < qty):
+                    # Check if we should add more contracts
+                    bars_since_entry = i - position["entry_bar_index"]
+                    new_qty = 0
+                    if bars_since_entry == 1 and total_qty_open == S.NIFTY_LOT_SIZE:
+                        # First bar post-entry: add 1 more lot
+                        new_qty = S.NIFTY_LOT_SIZE
+                    elif bars_since_entry >= 2 and total_qty_open == 2 * S.NIFTY_LOT_SIZE:
+                        # Second+ bar post-entry: add remaining 2 lots
+                        new_qty = 2 * S.NIFTY_LOT_SIZE
+
+                    if new_qty > 0:
+                        # Add new contracts at this bar's open + slippage
+                        slip = S.SLIPPAGE_POINTS if direction == LONG else -S.SLIPPAGE_POINTS
+                        new_entry_px = bar.open + slip
+                        # Update position to track weighted average entry price
+                        old_cost = position["entry_price"] * total_qty_open
+                        new_cost = new_entry_px * new_qty
+                        total_qty_open += new_qty
+                        position["entry_price"] = (old_cost + new_cost) / total_qty_open
+
                 stop_px = position["stop_price"]
                 hit = (bar.low <= stop_px) if direction == LONG else (bar.high >= stop_px)
                 if hit:
@@ -152,21 +178,23 @@ def run_session(date: str, bars: List[Bar], ctx: SessionContext,
                         fill = min(bar.open, stop_px) - S.SLIPPAGE_POINTS
                     else:
                         fill = max(bar.open, stop_px) + S.SLIPPAGE_POINTS
-                    _close_futures(res, position, fill, bar.ts, "STOP_LOSS", qty)
+                    _close_futures(res, position, fill, bar.ts, "STOP_LOSS", total_qty_open)
                     position = None
+                    total_qty_open = 0
                     i += 1
                     continue
 
                 # MTM tracking on bar close
-                mtm = _futures_mtm(position, bar.close, qty)
+                mtm = _futures_mtm(position, bar.close, total_qty_open)
                 res.max_adverse_mtm = min(res.max_adverse_mtm, mtm)
 
                 # Forced square-off
                 if end_min >= SQUARE_OFF_MIN:
                     fill = bar.close - S.SLIPPAGE_POINTS if direction == LONG \
                         else bar.close + S.SLIPPAGE_POINTS
-                    _close_futures(res, position, fill, bar.ts, "SQUARE_OFF_1515", qty)
+                    _close_futures(res, position, fill, bar.ts, "SQUARE_OFF_1515", total_qty_open)
                     position = None
+                    total_qty_open = 0
                     i += 1
                     continue
 
@@ -176,8 +204,9 @@ def run_session(date: str, bars: List[Bar], ctx: SessionContext,
                 if action == "EXIT_REVERSAL":
                     fill = bar.close - S.SLIPPAGE_POINTS if direction == LONG \
                         else bar.close + S.SLIPPAGE_POINTS
-                    _close_futures(res, position, fill, bar.ts, "REVERSAL_EXIT", qty)
+                    _close_futures(res, position, fill, bar.ts, "REVERSAL_EXIT", total_qty_open)
                     position = None
+                    total_qty_open = 0
 
             else:  # STRADDLE
                 model: StraddleModel = position["model"]
@@ -246,14 +275,16 @@ def run_session(date: str, bars: List[Bar], ctx: SessionContext,
                 if enter_directional:
                     slip = S.SLIPPAGE_POINTS if d.direction == LONG else -S.SLIPPAGE_POINTS
                     entry_px = nxt.open + slip
-                    stop_pts = stop_rupees / qty
+                    stop_pts = stop_rupees / qty  # stop calculated on full qty for consistency
                     position = {
                         "direction": d.direction,
                         "entry_price": entry_px,
                         "stop_price": entry_px - stop_pts if d.direction == LONG
                         else entry_px + stop_pts,
+                        "entry_bar_index": i + 1,  # for scaled entry tracking
                     }
                     res.direction = d.direction
+                    total_qty_open = S.NIFTY_LOT_SIZE  # start with 1 lot
                 else:
                     # NEUTRAL at cutoff -> short straddle (modelled)
                     model = StraddleModel(sigma_daily_pct)
@@ -278,7 +309,7 @@ def run_session(date: str, bars: List[Bar], ctx: SessionContext,
         if position["direction"] in (LONG, SHORT):
             fill = last.close - S.SLIPPAGE_POINTS if position["direction"] == LONG \
                 else last.close + S.SLIPPAGE_POINTS
-            _close_futures(res, position, fill, last.ts, "EOD_FAILSAFE", qty)
+            _close_futures(res, position, fill, last.ts, "EOD_FAILSAFE", total_qty_open)
         else:
             _close_straddle(res, position, last.close, last.ts, "EOD_FAILSAFE",
                             _minutes(last.ts) + S.BAR_INTERVAL_MINUTES,
@@ -295,7 +326,8 @@ def _futures_mtm(position: dict, price: float, qty: int) -> float:
 def _close_futures(res: SessionResult, position: dict, fill: float,
                    ts: str, reason: str, qty: int) -> None:
     gross = _futures_mtm(position, fill, qty)
-    costs = futures_roundtrip_costs(position["entry_price"], fill, S.MAX_CONTRACTS)
+    lots = qty // S.NIFTY_LOT_SIZE  # actual number of lots entered
+    costs = futures_roundtrip_costs(position["entry_price"], fill, lots)
     res.exit_time, res.exit_price, res.exit_reason = ts, fill, reason
     res.gross_pnl, res.costs, res.net_pnl = gross, costs, gross - costs
     res.max_adverse_mtm = min(res.max_adverse_mtm, gross)
